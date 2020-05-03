@@ -3,56 +3,15 @@ use std::collections::{HashMap};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher, BuildHasherDefault};
 use std::fmt::{Debug, Display};
-use std::{fmt};
+use std::{fmt, fs};
 use std::cmp::min;
 use std::time::SystemTime;
 
-// todo:
-// find out if it's better to store array size or call len() each time
-// implement my own (generic) Hasher to replace DefaultHasher
-// better way to prevent hashing to 0
-// test different neighborhood sizes (see what load factors they result in)
-// implement keys(), shrink(), etc.
-
 fn main() {
-    // let mut words = Vec::new();
-
-    // // SMALL INPUT
-    // let filename = "all-words.txt";
-    // let contents = fs::read_to_string(filename)
-    //     .expect("Something went wrong reading the file");
-    // for line in contents.split("\n") {
-    //     words.push(line)
-    // }
-    // println!("{}", words.len());
-
-    // // LARGE INPUT
-    // let filename = "sampleFICT.txt";
-    // let contents = fs::read_to_string(filename)
-    //     .expect("Something went wrong reading the file");
-    // for line in contents.split(" ") {
-    //     words.push(line)
-    // }
-    // println!("contains: {}", words.len());
-
     let start_time = SystemTime::now();
 
-    // // STRING
-    // // RUST BUILT-IN
-    // // let mut rust_map: HashMap<u32, &str> = HashMap::new();
-    // // for i in 0..words.len() {
-    // //     rust_map.insert(i as u32, words[i]);
-    // // }
-    //
-    // // MY TABLE
-    // let mut map: MyHashMap<u32, &str> = MyHashMap::new();
-    // for i in 0..words.len() {
-    //     map.insert(i as u32, words[i]);
-    //     //print!("{}\n\n", map);
-    // }
-
-    // INT
-    let size = 1e6 as usize;
+    // INT BENCHMARK
+    let size = 1e7 as usize;
     println!("input size: {}", size);
 
     // // RUST BUILT-IN
@@ -60,23 +19,20 @@ fn main() {
     // for i in 0..size {
     //     rust_map.insert(i, ());
     // }
-    // // for i in 0..size {
-    // //     rust_map.get(&i);
-    // // }
-    // // println!("{}", rust_map);
-    // println!("{} {}", "final table size:", rust_map.capacity());
-    // println!("{} {}", "final entries stored:", rust_map.len());
+    // for i in 0..size {
+    //     rust_map.get(&i);
+    // }
+    // println!("{} {}", "final capacity:", rust_map.capacity());
 
     // MY TABLE
     let mut map: MyHashMap<usize, usize> = MyHashMap::new();
     for i in 0..size {
         map.insert(i, i);
     }
-    // for i in 0..size {
-    //     map.get(&i);
-    // }
-    println!("{} {}", "final table size:", map.table.len());
-    println!("{} {}", "final entries stored:", map.len());
+    for i in 0..size {
+        map.get(&i);
+    }
+    println!("{} {}", "final capacity:", map.table.len());
 
     println!("elapsed time: {:?}", SystemTime::now().duration_since(start_time).unwrap());
 }
@@ -95,49 +51,52 @@ impl<K: Default + Clone, V: Default + Clone> Entry<K, V> {
 #[derive(Debug)]
 struct MyHashMap<K, V> {
     table: Vec<Entry<K, V>>,
-    H: usize  // neighborhood size
+    H: usize,  // neighborhood size
+    bitmasks: Vec<u32>  // bitmasks store relative indices of entries that hashed to that home location
 }
 
 impl<K: Default + Hash + Copy + Clone + Eq + Display, V: Default + Hash + Copy + Clone + Eq + Display> MyHashMap<K, V> {
     pub fn new () -> Self {
-        Self { table: vec![Entry::new(); 64], H: 32}
+        Self { table: vec![Entry::new(); 64], H: 16, bitmasks: vec![0; 64]}
     }
 
     pub fn new_param (initial_size: usize) -> Self {
-        Self { table: vec![Entry::new(); initial_size], H: 16}
+        Self { table: vec![Entry::new(); initial_size], H: 16, bitmasks: vec![0; initial_size]}
     }
 
     // either inserts new key or changes value of existing one
     pub fn insert (&mut self, key: K, val: V) {
         let home = get_hash(&key, self.table.len(), self.H);
         // look through neighborhood for empty space
-        let mut empty = 0; // (nothing will be stored at position 0)
-        let mut same = 0;
-        for i in home..(min(home + self.H, self.table.len())) {
-            // find first empty space
-            if empty == 0 && self.table[i].home == 0 {
-                empty = i;
-            }
-            // if key is already in table...
-            if self.table[i].home == home && self.table[i].key.eq(&key) {
-                same = i;
-                break
+
+        // check to see if key already exists in map and entry needs to be updated
+        let bm = self.bitmasks[home];
+        for i in 0..self.H {
+            if (bm & (1 << i as u32)) == 1 {
+                if self.table[home + i].key.eq(&key) {
+                    // same key value, update entry
+                    self.table[home + i] = Entry { key, val, home };
+                    return
+                }
             }
         }
 
-        // replace entry if it already existed, or store in empty space if one was found
-        if same != 0 {
-            self.table[same] = Entry { key, val, home };
-            return
-        } else if empty != 0 {
-            self.table[empty] = Entry { key, val, home };
-            return
+        let end_of_H = min(home + self.H, self.table.len());
+
+        // look through neighborhood for empty spaces first
+        for i in home..end_of_H {
+            if self.table[i].home == 0 {  // if space is empty
+                // put entry in empty space
+                self.table[i] = Entry { key, val, home };
+                self.bitmasks[home] |= 1 << ((i - home) as u32);
+                return
+            }
         }
 
         // if no room in neighborhood, look through the rest of the table for an empty space to swap with
         // ei -> (potentially) empty index, si -> interval starting index, ci -> swap candidate index
-        for mut ei in home..self.table.len() {
-            if self.table[ei].home == 0 {
+        for mut ei in end_of_H..self.table.len() {
+            if self.table[ei].home == 0 {  // if space is empty
                 let mut si = ei - (self.H - 1);
                 'inner: loop {
                     // found an empty space! now let's find something we can swap with it
@@ -158,6 +117,7 @@ impl<K: Default + Hash + Copy + Clone + Eq + Display, V: Default + Hash + Copy +
                             if ei - home < self.H {
                                 // we are now within the neighborhood, so put new entry in empty space
                                 self.table[ei] = Entry { key, val, home };
+                                self.bitmasks[home] |= 1 << ((ei - home) as u32);
                                 return
                             } else {
                                 // look for another swap to move empty closer (or into) neighborhood
@@ -189,11 +149,17 @@ impl<K: Default + Hash + Copy + Clone + Eq + Display, V: Default + Hash + Copy +
     // used for get and remove methods (to avoid duplicated code)
     fn find (&mut self, key: &K, remove: bool) -> Option<V> {
         let home = get_hash(&key, self.table.len(), self.H);
-        for i in home..(home + self.H) {
-            let entry = self.table[i];
-            if entry.home == home && entry.key.eq(key) {
-                if remove { self.table[i] = Entry::new() }
-                return Some(entry.val)
+        let bm = self.bitmasks[home];
+        for i in 0..self.H {
+            if (bm & (1 << i as u32)) == 1 {
+                let entry = self.table[home + i];
+                if entry.key.eq(&key) {
+                    if remove {
+                        self.table[home + i] = Entry::new();
+                        self.bitmasks[home] &= !((1 << i) as u32);
+                    }
+                    return Some(entry.val)
+                }
             }
         }
         return None
@@ -205,7 +171,7 @@ impl<K: Default + Hash + Copy + Clone + Eq + Display, V: Default + Hash + Copy +
 
     // number of elements in table (not including empty spaces)
     pub fn len (&self) -> usize {
-        return (&self.table).iter().filter((|e| { e.home != 0 })).count()
+        return (&self.table).iter().filter(|e| { e.home != 0 }).count()
     }
 
     fn expand (&mut self) {
@@ -224,7 +190,7 @@ impl<K: Display, V: Display> fmt::Display for MyHashMap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut ret_str: String = String::new();
         for (i, elem) in self.table.iter().enumerate() {
-            let elem_str = format!("i: {}, {}\n", i, elem);
+            let elem_str = format!("i: {}, bm: {:b}, {}\n", i, self.bitmasks[i], elem);
             ret_str = format!("{}{}", ret_str, elem_str)
         }
         write!(f, "{}", ret_str)
@@ -245,7 +211,7 @@ fn get_hash<T: Hash> (key: &T, table_size: usize, neighborhood_size: usize) -> u
     return hash
 }
 
-// currently unused
+// currently unused (not working)
 
 #[derive(Debug, Clone)]
 pub struct MyHasher {
@@ -260,12 +226,10 @@ impl MyHasher {
 
 impl Hasher for MyHasher {
     fn finish(&self) -> u64 {
-        // Your hashing algorithm goes here!
         self.hash as u64
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        // Your hashing algorithm goes here!
         let mut hash: usize = 5381;
         for b in bytes {
             hash = (hash << 5).wrapping_add(hash).wrapping_add(*b as usize);
